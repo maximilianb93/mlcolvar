@@ -54,7 +54,7 @@ class Committor(BaseCV, lightning.LightningModule):
         use_gradients_wrt_positions: bool = True,
         z_regularization: float = 0.0,
         z_threshold: float = None,
-        n_dim: int = 3,
+        n_dim: int = None,
         norm_in: bool = False,
         options: dict = None,
         **kwargs,
@@ -95,7 +95,8 @@ class Committor(BaseCV, lightning.LightningModule):
             Sets a maximum threshold for the z value during the training, by default None. 
             The magnitude of the regularization term is scaled via the `z_regularization` key.
         n_dim : int
-            Number of dimensions, by default 3.
+            Number of dimensions, by default None. 
+            If None, it defaults to 3 for the position-based loss and to 1 for the position-less loss.
         norm_in : bool
             Whether to normalize the input of the NN model, by default False.
         options : dict[str, Any], optional
@@ -560,7 +561,4 @@ def test_committor_with_derivatives():
             trainer.fit(model, wrong_datamodule)
         except ValueError as e:
             print("[TEST LOG] Checked this error: ", e)
-
-if __name__ == "__main__":
-    test_committor()
     

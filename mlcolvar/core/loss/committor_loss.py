@@ -38,7 +38,7 @@ class CommittorLoss(torch.nn.Module):
                 use_gradients_wrt_positions: bool = True,
                 z_regularization: float = 0.0,
                 z_threshold: float = None,
-                n_dim : int = 3,
+                n_dim : int = None,
                  ):
         """Compute Kolmogorov's variational principle loss and impose boundary conditions on the metastable states
 
@@ -80,7 +80,8 @@ class CommittorLoss(torch.nn.Module):
             Sets a maximum threshold for the z value during the training, by default None. 
             The magnitude of the regularization term is scaled via the `z_regularization` key.
         n_dim : int
-            Number of dimensions, by default 3.
+            Number of dimensions, by default None. 
+            If None, it defaults to 3 for the position-based loss and to 1 for the position-less loss.
         """
         super().__init__()
         self.register_buffer("atomic_masses", atomic_masses)
@@ -172,7 +173,7 @@ def committor_loss(x: torch.Tensor,
                    z_regularization: float = 0.0,
                    z_threshold : float = None,
                    ref_idx: torch.Tensor = None,
-                   n_dim : int = 3,
+                   n_dim : int = None,
                   ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Compute variational loss for committor optimization with boundary conditions
 
@@ -227,7 +228,8 @@ def committor_loss(x: torch.Tensor,
         Ref_idx can be generated automatically using SmartDerivatives or by setting create_ref_idx=True when initializing a DictDataset.
         See also mlcolvar.core.loss.utils.smart_derivatives.SmartDerivatives
     n_dim : int
-        Number of dimensions, by default 3.
+        Number of dimensions, by default None. 
+        If None, it defaults to 3 for the position-based loss and to 1 for the position-less loss.
 
     Returns
         -------
@@ -253,6 +255,12 @@ def committor_loss(x: torch.Tensor,
     if (z_threshold is not None and (z_regularization == 0 or z_threshold <= 0)) or (z_threshold is None and z_regularization != 0) or z_regularization < 0:
         raise ValueError(f"To apply the regularization on z space both z_threshold and z_regularization key must be positive. Found {z_threshold} and {z_regularization}!")
 
+    if n_dim is None:
+        n_dim = 3 if use_gradients_wrt_positions else 1
+    else:
+        if n_dim < 1 or n_dim > 3:
+            raise ValueError(f"n_dim should be a positive integer between 1 and 3, found {n_dim}!")
+        
     # ------------------------ SETUP ------------------------
     # inherit right device
     device = x.device 
