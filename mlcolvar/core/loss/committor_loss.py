@@ -24,18 +24,18 @@ from mlcolvar.core.loss.utils.smart_derivatives import SmartDerivatives
 
 
 class CommittorLoss(torch.nn.Module):
-    """Compute a loss function based on Kolmogorov's variational principle for the determination of the committor function"""
+    """Compute a loss function based on Kolmogorov's variational principle (or its approximation) for the determination of the committor function"""
 
     def __init__(self,
-                atomic_masses: torch.Tensor,
                 alpha: float,
+                atomic_masses: Union[torch.Tensor, None],
                 cell: float = None,
                 gamma: float = 10000.0,
                 delta_f: float = 0.0,
                 separate_boundary_dataset : bool = True,
                 descriptors_derivatives : Union[SmartDerivatives, torch.Tensor] = None,
                 log_var: bool = False,
-                cauchy_var: bool = False,
+                use_gradients_wrt_positions: bool = True,
                 z_regularization: float = 0.0,
                 z_threshold: float = None,
                 n_dim : int = 3,
@@ -44,10 +44,12 @@ class CommittorLoss(torch.nn.Module):
 
         Parameters
         ----------
-        atomic_masses : torch.Tensor
-            Atomic masses of the atoms in the system
         alpha : float
             Hyperparamer that scales the boundary conditions contribution to loss, i.e. alpha*(loss_bound_A + loss_bound_B)
+        atomic_masses : torch.Tensor, optional
+            List of masses of all the atoms we are using, for each atom we need to repeat three times for x,y,z, by default None.
+            The mlcolvar.cvs.committor.utils.initialize_committor_masses can be used to simplify this.
+            If the position-less loss is used, this must be set to None.
         cell : float, optional
             CUBIC cell size length, used to scale the positions from reduce coordinates to real coordinates, by default None
         gamma : float, optional
@@ -69,8 +71,8 @@ class CommittorLoss(torch.nn.Module):
             See also mlcolvar.core.loss.utils.smart_derivatives.SmartDerivatives
         log_var : bool, optional
             Switch to minimize the log of the variational functional, by default False.
-        cauchy_var : bool, optional
-            Switch to minimize the variational functional from Cauchy decomposition, i.e., modulus of gradients to the 4th, by default False. 
+        use_gradients_wrt_positions : bool, optional
+            Whether to use gradients with respect to positions as prescribed in the original Kolmogorov variational functional, by default True.
         z_regularization : float, optional
             Scales a regularization on the learned z space preventing it from exceeding the threshold given with 'z_threshold'.
             The magnitude of the regularization is scaled by the given number, by default 0.0
@@ -89,7 +91,7 @@ class CommittorLoss(torch.nn.Module):
         self.descriptors_derivatives = descriptors_derivatives
         self.separate_boundary_dataset = separate_boundary_dataset
         self.log_var = log_var
-        self.cauchy_var = cauchy_var
+        self.use_gradients_wrt_positions = use_gradients_wrt_positions
         self.z_regularization = z_regularization
         self.z_threshold = z_threshold
         self.n_dim = n_dim
@@ -144,7 +146,7 @@ class CommittorLoss(torch.nn.Module):
                               separate_boundary_dataset=self.separate_boundary_dataset,
                               descriptors_derivatives=self.descriptors_derivatives,
                               log_var=self.log_var,
-                              cauchy_var=self.cauchy_var,
+                              use_gradients_wrt_positions=self.use_gradients_wrt_positions,
                               z_regularization=self.z_regularization,
                               z_threshold=self.z_threshold,
                               ref_idx=ref_idx,
@@ -157,8 +159,8 @@ def committor_loss(x: torch.Tensor,
                    q: torch.Tensor, 
                    labels: torch.Tensor, 
                    w: torch.Tensor,
-                   atomic_masses: torch.Tensor,
                    alpha: float,
+                   atomic_masses: Union[torch.Tensor, None] = None,
                    gamma: float = 10000,
                    delta_f: float = 0,
                    create_graph: bool = True,
@@ -166,7 +168,7 @@ def committor_loss(x: torch.Tensor,
                    separate_boundary_dataset: bool = True,
                    descriptors_derivatives: Union[SmartDerivatives, torch.Tensor] = None,
                    log_var: bool = False,
-                   cauchy_var: bool = False,
+                   use_gradients_wrt_positions: bool = True,
                    z_regularization: float = 0.0,
                    z_threshold : float = None,
                    ref_idx: torch.Tensor = None,
@@ -186,11 +188,12 @@ def committor_loss(x: torch.Tensor,
         Labels for states, A and B states for boundary conditions
     w : torch.Tensor
         Reweighing factors to Boltzmann distribution. This should depend on the simulation in which the data were collected.
-    atomic_masses : torch.Tensor
-        List of masses of all the atoms we are using, for each atom we need to repeat three times for x,y,z.
-        Can be created using `committor.utils.initialize_committor_masses`
     alpha : float
         Hyperparamer that scales the boundary conditions contribution to loss, i.e. alpha*(loss_bound_A + loss_bound_B)
+    atomic_masses : torch.Tensor, optional
+        List of masses of all the atoms we are using, for each atom we need to repeat three times for x,y,z, by default None.
+        The mlcolvar.cvs.committor.utils.initialize_committor_masses can be used to simplify this.
+        If the position-less loss is used, this must be set to None.
     gamma : float
         Hyperparamer that scales the whole loss to avoid too small numbers, i.e. gamma*(loss_var + loss_bound) 
         By default 10000
@@ -209,8 +212,9 @@ def committor_loss(x: torch.Tensor,
             - A torch.Tensor with the derivatives to save time, memory-wise could be less efficient
     log_var : bool, optional
         Switch to minimize the log of the variational functional, by default False.
-    cauchy_var : bool, optional
-        Switch to minimize the variational functional from Cauchy decomposition, i.e., modulus of gradients to the 4th, by default False. 
+    use_gradients_wrt_positions : bool, optional
+        Whether to use gradients with respect to positions as prescribed in the original Kolmogorov variational functional, by default True.
+        Set to false to use the approximated variational principle defined in Ref. [3] without explicit dependence on the atomic coordinates derivatives.
     z_regularization : float, optional
         Scales a regularization on the learned z space preventing it from exceeding the threshold given with 'z_threshold'.
         The magnitude of the regularization is scaled by the given number, by default 0.0
@@ -230,11 +234,18 @@ def committor_loss(x: torch.Tensor,
         Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
             Total loss and its components, i.e., variational, boundary A, and boundary B
     """
+
+    # internal consistency checks 
     if descriptors_derivatives is not None and ref_idx is None:
         raise ValueError ("Descriptors derivatives need reference indeces from the dataset! Use a dataset with the ref_idx, see docstrign for details")
 
-    if descriptors_derivatives is not None and cauchy_var:
-        raise ValueError ("Cauchy decomposition of variational loss is used with descriptors as inputs and no derivatives with respect to positions needed! Descriptors_derivatives should be None!")
+    if use_gradients_wrt_positions and atomic_masses is None:
+        raise ValueError ("atomic_masses must be provided when using Kolmogorov variational functional (use_gradients_wrt_positions is True)")
+    elif not use_gradients_wrt_positions:
+        if atomic_masses is not None:
+            raise ValueError ("atomic_masses must be None when using approximated variational principle (use_gradients_wrt_positions is False)")
+        if descriptors_derivatives is not None:
+            raise ValueError ("descriptors_derivatives must be None when using approximated variational principle (use_gradients_wrt_positions is False)")
 
     if isinstance(descriptors_derivatives, torch.Tensor) and separate_boundary_dataset:
         raise ValueError ("Descriptors derivatives via explicit tensor are not implemented with separate_boundary_dataset key! Either use SmartDerivatives or deactivate separate_boundary_dataset")
@@ -247,7 +258,10 @@ def committor_loss(x: torch.Tensor,
     device = x.device 
 
     # expand mass tensor to [1, n_atoms*spatial_dims]
-    atomic_masses = atomic_masses.to(device).repeat_interleave(n_dim) 
+    if atomic_masses is not None:
+        atomic_masses = atomic_masses.to(device).repeat_interleave(n_dim) 
+    else: 
+        atomic_masses = torch.ones(x.shape[1], device=device)
 
     # squeeze labels
     labels = labels.squeeze()
@@ -293,12 +307,12 @@ def committor_loss(x: torch.Tensor,
         grad = grad / cell
     
     # in case the input is not positions but descriptors, we need to correct the gradients up to the positions
-    if isinstance(descriptors_derivatives, SmartDerivatives):
+    if use_gradients_wrt_positions and isinstance(descriptors_derivatives, SmartDerivatives):
         # we use the precomputed derivatives from descriptors to pos
         gradient_positions = descriptors_derivatives(grad, ref_idx[mask_var]).view(x[mask_var].shape[0], -1)
     
     # --> If we directly pass the matrix d_desc/d_pos
-    elif isinstance(descriptors_derivatives, torch.Tensor): 
+    elif use_gradients_wrt_positions and isinstance(descriptors_derivatives, torch.Tensor): 
         descriptors_derivatives = descriptors_derivatives.to(device)
         gradient_positions = torch.einsum("bd,badx->bax", grad, descriptors_derivatives[ref_idx[mask_var]]).contiguous()
         gradient_positions = gradient_positions.view(x[mask_var].shape[0], -1)
@@ -318,7 +332,7 @@ def committor_loss(x: torch.Tensor,
     except RuntimeError as e:
         raise RuntimeError(e, """[HINT]: Is you system in 3 dimension? By default the code assumes so, if it's not the case change the n_dim key to the right dimensionality.""")
 
-    if cauchy_var:
+    if not use_gradients_wrt_positions:
         grad_square = grad_square**2
     
     # variational contribution to loss: we sum over the batch    
